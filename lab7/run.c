@@ -11,7 +11,7 @@ int main(void){
     if (pid == 0) {
         printf("child:  my PID is %d, my parent is %d\n", getpid(), getppid());
         fflush(stdout);
-        execlp("nosuchprog", "nosuchprog", (char *)NULL);
+        execlp("ls", "ls", "-l", (char *)NULL);
         perror("exec");
         exit(127);
     }

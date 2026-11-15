@@ -1,0 +1,5 @@
+total 0
+lrwx------ 1 vboxuser vboxuser 64 Nov 15 18:53 0 -> /dev/pts/0
+l-wx------ 1 vboxuser vboxuser 64 Nov 15 18:53 1 -> /home/vboxuser/os-2026-CiurAlexandrina/lab9/part2_fd.txt
+lrwx------ 1 vboxuser vboxuser 64 Nov 15 18:53 2 -> /dev/pts/0
+lr-x------ 1 vboxuser vboxuser 64 Nov 15 18:53 3 -> /proc/10621/fd

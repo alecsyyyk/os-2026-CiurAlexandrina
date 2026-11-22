@@ -1,0 +1,40 @@
+Lab 13 - Semaphores in Your Own Kernel (xv6)
+Ciur Alexandrina, Sisteme de Operare, FCIM / UTM, 2026-2027
+
+Observe (Part 3: mix)
+
+1. Fără lock, de ce se amestecă literele? Câte apeluri de sistem costă o linie?
+   O linie costă 31 de apeluri write(): 30 de litere plus '\n', fiecare cu un write(1, p, 1)
+   separat. Între oricare două write-uri, kernelul poate comuta pe celălalt proces sau, cum
+   make qemu pornește 3 CPU-uri, celălalt proces chiar rulează în paralel și scrie și el pe
+   consolă. Fiecare write() e indivizibil doar pentru propria literă, nu pentru toată linia,
+   așa că literele 'A' și 'b' se intercalează.
+
+2. Cu lock, fiecare linie e întreagă. Ce două linii din mix.c fac dintr-o linie o secțiune critică?
+       if (uselock) sem_down(3);    // înainte de bucla care scrie literele
+       if (uselock) sem_up(3);      // după bucla care scrie literele
+   Semaforul 3 pornește de la 1 (sem_init(3, 1)), deci e un lock. Doar un proces poate fi
+   între sem_down(3) și sem_up(3), iar celălalt doarme în kernel până când linia e scrisă
+   complet.
+
+3. În sem_down testul e "while (s->value == 0)", nu "if". De ce poate un proces să se
+   trezească și să găsească tot 0?
+   sem_up face wakeup(s), care îi trezește pe TOȚI cei care dorm pe adresa s, dar valoarea
+   crește doar cu 1. Dacă dormeau două procese, amândouă devin RUNNABLE. Primul care reia
+   spinlock-ul ia unitatea (value revine la 0), iar al doilea, când reia lock-ul, găsește
+   tot 0. Tot așa, un al treilea proces poate face sem_down între wakeup și momentul în care
+   procesul trezit reia lock-ul. Mai e și cazul kill: procesul e trezit, dar valoarea nu s-a
+   schimbat. Cu "while", condiția e verificată din nou și procesul se culcă la loc.
+
+4. sem_down face release(&s->lock) ÎNAINTE de sleep(). Ce s-ar strica dacă ar dormi ținând
+   spinlock-ul?
+   Procesul care ar trebui să-l trezească, sem_up, are nevoie de același spinlock ca să
+   facă value++ și wakeup(s). Dacă cel care doarme ține lock-ul, sem_up se învârte la
+   nesfârșit în acquire(), adică un deadlock: cel care doarme așteaptă un sem_up care nu
+   poate ajunge niciodată la wakeup. În plus, în xv6 acquire() dezactivează întreruperile
+   pe CPU-ul respectiv (push_off), iar scheduler-ul nu permite să cedezi procesorul ținând
+   un spinlock (de obicei panic: "sched locks"). Spinlock-ul se ține doar pentru câteva
+   instrucțiuni, niciodată în timp ce procesul doarme. De aceea xv6-ul nostru face întâi
+   sleep_prepare(s) (procesul se înregistrează pe canal), apoi release, apoi sleep(). Dacă
+   sem_up vine între release și sleep(), sleep() se întoarce imediat, deci trezirea nu se
+   pierde.

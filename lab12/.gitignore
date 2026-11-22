@@ -1,0 +1,6 @@
+prodcons
+condvar
+readers
+deadlock
+*.o
+deadlock_original

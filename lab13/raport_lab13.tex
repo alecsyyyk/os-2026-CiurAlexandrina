@@ -1,0 +1,410 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\IfFileExists{romanian.ldf}{\usepackage[romanian]{babel}}{}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[most]{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{codebg}{RGB}{247,247,250}
+\definecolor{kw}{RGB}{0,70,150}
+\definecolor{cm}{RGB}{90,120,90}
+\definecolor{st}{RGB}{160,60,30}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  numbers=left, numberstyle=\tiny\color{gray},
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, tabsize=4,
+  literate={ă}{{\u{a}}}1 {â}{{\^{a}}}1 {î}{{\^{\i}}}1 {ș}{{\c{s}}}1 {ț}{{\c{t}}}1
+}
+
+\newtcolorbox{terminal}[1][]{colback=black!85,colframe=black!60,coltext=white,
+  fontupper=\ttfamily\small,boxrule=0.4pt,arc=2pt,left=4pt,right=4pt,top=3pt,bottom=3pt,title={#1},
+  fonttitle=\sffamily\small\bfseries,colbacktitle=black!60}
+\newtcolorbox{answer}{colback=blue!3,colframe=blue!40!black,boxrule=0.4pt,arc=2pt,
+  left=6pt,right=6pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Sisteme de Operare -- FCIM, UTM}
+\rhead{Ciur Alexandrina}
+\cfoot{\thepage}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\large Ministerul Educației și Cercetării al Republicii Moldova\\
+Universitatea Tehnică a Moldovei\\
+Facultatea Calculatoare, Informatică și Microelectronică\par}
+\vspace{5cm}
+{\LARGE\bfseries RAPORT\par}
+\vspace{0.6cm}
+{\Large Lucrarea de laborator nr.~13\par}
+\vspace{0.4cm}
+{\large la disciplina \textit{Sisteme de Operare}\par}
+\vspace{0.6cm}
+{\Large\bfseries Semaphores in Your Own Kernel (xv6)\par}
+\vfill
+\begin{flushright}
+\begin{tabular}{ll}
+A efectuat: & Ciur Alexandrina \\
+A verificat: & \rule{4.5cm}{0.4pt} \\
+\end{tabular}
+\end{flushright}
+\vspace{2cm}
+{\large Chișinău, 2026\par}
+\end{titlepage}
+
+\section*{Scopul lucrării}
+În laboratoarele 11 și 12 semafoarele au fost \emph{folosite} din biblioteca C. Acum le \emph{construim} în kernelul xv6,
+ca trei apeluri de sistem noi: \texttt{sem\_init}, \texttt{sem\_down} și \texttt{sem\_up} (numerele 24, 25, 26). Scopul e
+să vedem că un semafor e doar un număr, un spinlock care îl protejează și mecanismul \texttt{sleep}/\texttt{wakeup} al
+kernelului. Procesele care așteaptă dorm cu adevărat și nu consumă CPU.
+
+\section*{Noțiuni teoretice}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Apel de sistem în xv6}: programul utilizator apelează un \emph{stub} generat de \texttt{usys.pl}, care
+        pune numărul apelului în registrul \texttt{a7} și execută \texttt{ecall}. Kernelul caută numărul în tabelul
+        \texttt{syscalls[]} din \texttt{syscall.c} și apelează funcția \texttt{sys\_*}.
+  \item \textbf{Spinlock}: lock în care CPU-ul se învârte (busy-wait) până devine liber. În xv6, \texttt{acquire}
+        dezactivează și întreruperile. Se ține doar foarte scurt și niciodată în timp ce procesul doarme.
+  \item \textbf{sleep / wakeup}: un proces adoarme pe un \emph{canal} (o adresă oarecare), iar \texttt{wakeup(chan)}
+        îi face RUNNABLE pe toți cei care dorm pe acel canal. Kernelul nostru adoarme în doi pași:
+        \texttt{sleep\_prepare(chan)}, apoi \texttt{sleep()}. Dacă între ei vine un \texttt{wakeup},
+        \texttt{sleep()} se întoarce imediat, deci trezirea nu se pierde.
+\end{itemize}
+
+%======================================================================
+\section{Partea 1 -- Numerele și partea de utilizator}
+Rețeta e aceeași ca la \texttt{trace} din laboratorul 10, aplicată de trei ori. Semafoarele sunt numerotate de la 0 la 7
+și sunt comune tuturor proceselor. Numărul 23 rămâne rezervat pentru \texttt{trace}.
+
+\begin{lstlisting}[language=C,title={\texttt{snippets/syscall.h}}]
+// kernel/syscall.h
+#define SYS_sync     22
+#define SYS_sem_init 24   // new
+#define SYS_sem_down 25   // new
+#define SYS_sem_up   26   // new
+\end{lstlisting}
+\begin{lstlisting}[language=C,title={\texttt{snippets/user.h}}]
+// user/user.h
+int sync(void);
+int sem_init(int, int);   // new: id, start value
+int sem_down(int);        // new: take one, or sleep
+int sem_up(int);          // new: give one back
+\end{lstlisting}
+\begin{lstlisting}[language=Perl,title={\texttt{snippets/usys.pl}}]
+# user/usys.pl
+entry("sync");
+entry("sem_init");       # new
+entry("sem_down");       # new
+entry("sem_up");         # new
+\end{lstlisting}
+\begin{lstlisting}[language=make,title={\texttt{snippets/Makefile}}]
+# Makefile - OBJS (two spaces in front)
+  $K/sysproc.o \
+  $K/sem.o \
+
+# Makefile - UPROGS (a TAB in front)
+	$U/_zombie\
+	$U/_semtest\
+	$U/_mix\
+\end{lstlisting}
+
+\subsection*{Programul de test \texttt{semtest}}
+Testul 1: copilul trebuie să aștepte părintele (semaforul 0 pornește de la 0). Testul 2: ping și pong alternează, cu două
+semafoare care își pasează rândul.
+\begin{lstlisting}[language=C,title={\texttt{user/semtest.c}}]
+// semtest.c: two tests for the kernel semaphores (Lab 13).
+#include "kernel/types.h"
+#include "user/user.h"
+
+int
+main(void)
+{
+  // Test 1: order. Semaphore 0 starts at 0, so the child must wait.
+  sem_init(0, 0);
+  if (fork() == 0) {
+    sem_down(0);
+    printf("child: I ran after the parent\n");
+    exit(0);
+  }
+  pause(10);
+  printf("parent: done, I let the child go\n");
+  sem_up(0);
+  wait(0);
+
+  // Test 2: ping-pong. Semaphore 1 = ping's turn, semaphore 2 = pong's turn.
+  sem_init(1, 1);
+  sem_init(2, 0);
+  if (fork() == 0) {
+    for (int i = 1; i <= 3; i++) {
+      sem_down(2);
+      printf("  pong %d\n", i);
+      sem_up(1);
+    }
+    exit(0);
+  }
+  for (int i = 1; i <= 3; i++) {
+    sem_down(1);
+    printf("ping %d\n", i);
+    sem_up(2);
+  }
+  wait(0);
+  printf("semtest: OK\n");
+  exit(0);
+}
+\end{lstlisting}
+
+\subsection*{Programul \texttt{mix}}
+\begin{lstlisting}[language=C,title={\texttt{user/mix.c}}]
+// mix.c: two processes print five lines each, one letter per write().
+//   mix        no lock: the letters of the two processes can mix
+//   mix lock   semaphore 3 used as a lock: every line stays whole
+#include "kernel/types.h"
+#include "user/user.h"
+
+void
+lines(char *s, int uselock)
+{
+  for (int k = 0; k < 5; k++) {
+    if (uselock)
+      sem_down(3);
+    for (char *p = s; *p; p++)
+      write(1, p, 1);
+    if (uselock)
+      sem_up(3);
+  }
+}
+
+int
+main(int argc, char *argv[])
+{
+  int uselock = (argc > 1);
+  sem_init(3, 1);
+  if (fork() == 0) {
+    lines("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", uselock);
+    exit(0);
+  }
+  lines("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n", uselock);
+  wait(0);
+  exit(0);
+}
+\end{lstlisting}
+
+\begin{terminal}[Check 1: apelurile ajung în kernel, care încă nu le cunoaște]
+\begin{verbatim}
+$ semtest
+3 semtest: unknown sys call 24
+4 semtest: unknown sys call 25
+child: I ran after the parent
+parent: done, I let the child go
+...
+\end{verbatim}
+\end{terminal}
+Linia \texttt{child:} apare \textbf{înaintea} liniei \texttt{parent:}. Fără semafoare, copilul nu așteaptă nimic și rulează
+primul, pentru că părintele face \texttt{pause(10)}. Mesajele \texttt{unknown sys call} arată că stub-urile funcționează,
+dar tabelul din kernel nu are încă intrările 24--26.
+
+%======================================================================
+\section{Partea 2 -- Partea de kernel}
+Fișierul nou \texttt{kernel/sem.c}. Inima lui e \texttt{sys\_sem\_down}: cât timp valoarea e 0, procesul se înregistrează
+pe adresa semaforului, eliberează spinlock-ul și adoarme. \texttt{sys\_sem\_up} crește valoarea cu 1 și îi trezește pe toți
+cei care dorm pe acea adresă.
+
+\begin{lstlisting}[language=C,title={\texttt{kernel/sem.c}}]
+// sem.c: counting semaphores inside the xv6 kernel (Lab 13).
+// A small table of NSEM semaphores, shared by every process.
+// Each one is a number plus a spinlock that protects the number.
+
+#include "types.h"
+#include "riscv.h"
+#include "defs.h"
+#include "param.h"
+#include "spinlock.h"
+#include "proc.h"
+
+#define NSEM 8
+
+struct sem {
+  struct spinlock lock;   // a zeroed spinlock is a free spinlock
+  int value;              // how many may still pass
+};
+
+static struct sem sems[NSEM];
+
+// sem_init(id, value): give semaphore id its start value.
+uint64
+sys_sem_init(void)
+{
+  int id, value;
+  argint(0, &id);
+  argint(1, &value);
+  if (id < 0 || id >= NSEM || value < 0)
+    return -1;
+  acquire(&sems[id].lock);
+  sems[id].value = value;
+  release(&sems[id].lock);
+  return 0;
+}
+
+// sem_down(id): take one unit; if there is none, sleep until there is.
+uint64
+sys_sem_down(void)
+{
+  int id;
+  argint(0, &id);
+  if (id < 0 || id >= NSEM)
+    return -1;
+  struct sem *s = &sems[id];
+
+  acquire(&s->lock);
+  while (s->value == 0) {
+    sleep_prepare(s);       // I will sleep on the address of s
+    release(&s->lock);      // never sleep holding a spinlock
+    sleep();                // returns at once if sem_up came in between
+    acquire(&s->lock);
+    if (killed(myproc())) { // kill must still work on a waiting process
+      release(&s->lock);
+      return -1;
+    }
+  }
+  s->value--;
+  release(&s->lock);
+  return 0;
+}
+
+// sem_up(id): give one unit back and wake whoever sleeps on s.
+uint64
+sys_sem_up(void)
+{
+  int id;
+  argint(0, &id);
+  if (id < 0 || id >= NSEM)
+    return -1;
+  struct sem *s = &sems[id];
+
+  acquire(&s->lock);
+  s->value++;
+  wakeup(s);
+  release(&s->lock);
+  return 0;
+}
+\end{lstlisting}
+
+Fișierul e adăugat în lista \texttt{OBJS} din Makefile (\texttt{\$K/sem.o}), iar funcțiile sunt legate în tabelul de
+apeluri de sistem:
+\begin{lstlisting}[language=C,title={\texttt{snippets/syscall.c}}]
+// kernel/syscall.c
+extern uint64 sys_sync(void);
+extern uint64 sys_sem_init(void);   // new
+extern uint64 sys_sem_down(void);   // new
+extern uint64 sys_sem_up(void);     // new
+...
+  [SYS_sync]     = sys_sync,
+  [SYS_sem_init] = sys_sem_init,    // new
+  [SYS_sem_down] = sys_sem_down,    // new
+  [SYS_sem_up]   = sys_sem_up,      // new
+\end{lstlisting}
+
+\begin{terminal}[Check 2: semtest]
+\begin{verbatim}
+$ semtest
+parent: done, I let the child go
+child: I ran after the parent
+ping 1
+  pong 1
+ping 2
+  pong 2
+ping 3
+  pong 3
+semtest: OK
+\end{verbatim}
+\end{terminal}
+Părintele așteaptă 10 tick-uri înainte să-l elibereze pe copil, dar copilul afișează al doilea: a dormit în
+\texttt{sem\_down(0)}. Ping și pong alternează strict, de câte trei ori.
+
+%======================================================================
+\section{Partea 3 -- Semaforul ca lock: \texttt{mix}}
+\texttt{mix} pornește două procese care afișează câte cinci linii, câte o literă per \texttt{write()}. \texttt{make qemu}
+folosește 3 CPU-uri, deci procesele rulează cu adevărat în paralel.
+
+\begin{terminal}[Fără lock]
+\begin{verbatim}
+$ mix
+AAAAAAAbAbbAbAbbbbbAbAbAbbAbAbbbbbbbbbbbbbbbb
+AbAbbbbbbbAbbAbAbAbAbAbbbbbbbbbbbbbbbAb
+AAAAbbAA
+bbbbbbbbbbbAbAAAAbbbAbAbAbAbAbAbAbAbAbAbAbAbAbA
+AbAbAbAbAbAbAbAbAbbbAbbAb
+\end{verbatim}
+\end{terminal}
+
+\begin{terminal}[Cu lock (semaforul 3, pornit de la 1)]
+\begin{verbatim}
+$ mix lock
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+\end{verbatim}
+\end{terminal}
+
+\subsection*{Observații}
+\begin{answer}
+\textbf{1. De ce se amestecă literele fără lock.} O linie costă \textbf{31 de apeluri} \texttt{write()} (30 de litere plus
+\texttt{\textbackslash n}). Între oricare două \texttt{write}-uri, celălalt proces (care rulează în paralel pe alt CPU,
+sau după o comutare de context) poate scrie și el. Fiecare \texttt{write()} e indivizibil doar pentru litera lui, nu pentru
+toată linia.
+
+\medskip
+\textbf{2. Liniile care fac o linie secțiune critică.} \texttt{if (uselock) sem\_down(3);} înainte de bucla de
+\texttt{write} și \texttt{if (uselock) sem\_up(3);} după ea. Semaforul 3 pornește de la 1, deci e un lock: un singur proces
+poate fi între ele, iar celălalt doarme în kernel.
+
+\medskip
+\textbf{3. De ce \texttt{while (s->value == 0)}, nu \texttt{if}.} \texttt{wakeup(s)} îi trezește pe \emph{toți} cei care
+dorm pe \texttt{s}, dar \texttt{sem\_up} adaugă o singură unitate. Primul care reia spinlock-ul ia unitatea, iar ceilalți
+găsesc tot 0. Un al treilea proces poate face \texttt{sem\_down} între \texttt{wakeup} și momentul în care cel trezit reia
+lock-ul. Și un \texttt{kill} trezește procesul fără ca valoarea să se fi schimbat. \texttt{while} reverifică condiția și
+procesul se culcă la loc.
+
+\medskip
+\textbf{4. De ce \texttt{release} înainte de \texttt{sleep()}.} \texttt{sem\_up} are nevoie de același spinlock ca să
+facă \texttt{value++} și \texttt{wakeup}. Dacă procesul ar dormi ținând lock-ul, \texttt{sem\_up} s-ar învârti la
+nesfârșit în \texttt{acquire} și ar apărea un deadlock: cel care doarme așteaptă o trezire care nu poate veni. În plus,
+\texttt{acquire} dezactivează întreruperile, iar scheduler-ul xv6 nu permite cedarea CPU-ului cu un spinlock în plus ținut
+(\texttt{panic("sched locks")}). Ordinea \texttt{sleep\_prepare}, \texttt{release}, \texttt{sleep} garantează că un
+\texttt{sem\_up} venit între \texttt{release} și \texttt{sleep()} nu se pierde.
+\end{answer}
+
+%======================================================================
+\section*{Concluzii}
+Am implementat semafoare numărătoare direct în kernelul xv6, ca trei apeluri de sistem noi. Am parcurs întregul drum al
+unui apel de sistem: numărul în \texttt{syscall.h}, declarația din \texttt{user.h}, stub-ul generat de \texttt{usys.pl},
+intrarea din tabelul \texttt{syscalls[]} și implementarea din \texttt{sem.c}. Un semafor de kernel se reduce la un
+număr protejat de un spinlock și la mecanismul \texttt{sleep}/\texttt{wakeup}. Două reguli sunt esențiale: condiția se
+verifică într-un \texttt{while}, pentru că \texttt{wakeup} trezește pe toți, iar spinlock-ul se eliberează înainte de a
+dormi. Testele au confirmat ordonarea proceselor (copilul după părinte), alternarea strictă ping/pong și folosirea
+semaforului ca lock (\texttt{mix lock}).
+
+\end{document}

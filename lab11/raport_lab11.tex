@@ -1,0 +1,500 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\IfFileExists{romanian.ldf}{\usepackage[romanian]{babel}}{}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[most]{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{codebg}{RGB}{247,247,250}
+\definecolor{kw}{RGB}{0,70,150}
+\definecolor{cm}{RGB}{90,120,90}
+\definecolor{st}{RGB}{160,60,30}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  numbers=left, numberstyle=\tiny\color{gray},
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, tabsize=4,
+  literate={ă}{{\u{a}}}1 {â}{{\^{a}}}1 {î}{{\^{\i}}}1 {ș}{{\c{s}}}1 {ț}{{\c{t}}}1
+}
+
+\newtcolorbox{terminal}[1][]{colback=black!85,colframe=black!60,coltext=white,
+  fontupper=\ttfamily\small,boxrule=0.4pt,arc=2pt,left=4pt,right=4pt,top=3pt,bottom=3pt,title={#1},
+  fonttitle=\sffamily\small\bfseries,colbacktitle=black!60}
+\newtcolorbox{answer}{colback=blue!3,colframe=blue!40!black,boxrule=0.4pt,arc=2pt,
+  left=6pt,right=6pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Sisteme de Operare -- FCIM, UTM}
+\rhead{Ciur Alexandrina}
+\cfoot{\thepage}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\large Ministerul Educației și Cercetării al Republicii Moldova\\
+Universitatea Tehnică a Moldovei\\
+Facultatea Calculatoare, Informatică și Microelectronică\par}
+\vspace{5cm}
+{\LARGE\bfseries RAPORT\par}
+\vspace{0.6cm}
+{\Large Lucrarea de laborator nr.~11\par}
+\vspace{0.4cm}
+{\large la disciplina \textit{Sisteme de Operare}\par}
+\vspace{0.6cm}
+{\Large\bfseries The Race and the Semaphore (Linux)\par}
+\vfill
+\begin{flushright}
+\begin{tabular}{ll}
+A efectuat: & Ciur Alexandrina \\
+A verificat: & \rule{4.5cm}{0.4pt} \\
+\end{tabular}
+\end{flushright}
+\vspace{2cm}
+{\large Chișinău, 2026\par}
+\end{titlepage}
+
+\section*{Scopul lucrării}
+Două thread-uri care modifică aceeași variabilă în același timp pierd din operații. În această lucrare problema
+e observată direct (race condition), apoi reparată cu un \textbf{mutex} și cu un \textbf{semafor}. Același semafor POSIX
+e folosit apoi în trei roluri: ca \textbf{lock} (valoare inițială 1), ca \textbf{semnal} (valoare inițială 0) și ca
+\textbf{numărător} (valoare inițială $N$).
+
+\section*{Noțiuni teoretice}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Race condition}: rezultatul depinde de ordinea, nedeterministă, în care se execută thread-urile
+        care accesează o resursă comună.
+  \item \textbf{Secțiune critică}: porțiunea de cod care accesează date partajate și pe care trebuie să o execute
+        un singur thread la un moment dat.
+  \item \textbf{Mutex} (\texttt{pthread\_mutex\_t}): lock cu două stări; \texttt{lock} blochează thread-ul dacă alt
+        thread deține deja mutexul, iar \texttt{unlock} îl eliberează.
+  \item \textbf{Semafor} (\texttt{sem\_t}): un număr întreg care nu scade niciodată sub 0. \texttt{sem\_wait} ia o
+        unitate (și așteaptă dacă valoarea e 0), iar \texttt{sem\_post} adaugă o unitate și trezește un thread care
+        așteaptă.
+  \item \textbf{Operație atomică}: o operație executată de CPU ca un singur pas indivizibil (\texttt{atomic\_fetch\_add}).
+\end{itemize}
+Toate programele se compilează cu \texttt{gcc -Wall -pthread}, \textbf{fără} \texttt{-O2}, ca optimizatorul să nu
+ascundă race-ul (să nu păstreze \texttt{counter} într-un registru).
+
+%======================================================================
+\section{Partea 1 -- Observăm race condition-ul}
+Două thread-uri adaugă fiecare câte 1 la același contor, de un milion de ori. Rezultatul corect este 2\,000\,000.
+
+\begin{lstlisting}[language=C,title={\texttt{race.c}}]
+/* race.c - two threads add to the same counter, with no protection.
+ * Build: gcc -Wall -pthread -o race race.c       (no -O2: keep counter++ in memory)
+ * Run:   ./race   (several times)
+ */
+#include <stdio.h>
+#include <pthread.h>
+
+#define N 1000000
+
+long counter = 0;                          /* shared by both threads */
+
+void *add(void *arg) {
+    for (int i = 0; i < N; i++)
+        counter++;                         /* read, add 1, write back: three steps */
+    return NULL;
+}
+
+int main(void) {
+    pthread_t a, b;
+    pthread_create(&a, NULL, add, NULL);
+    pthread_create(&b, NULL, add, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    printf("counter = %ld (expected %d)\n", counter, 2 * N);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{terminal}[Compilare și rulare]
+\begin{verbatim}
+$ gcc -Wall -pthread -o race race.c
+$ ./race
+counter = 1029050 (expected 2000000)
+$ ./race
+counter = 1119205 (expected 2000000)
+$ ./race
+counter = 1303965 (expected 2000000)
+\end{verbatim}
+\end{terminal}
+
+\subsection*{Observații}
+\begin{answer}
+\textbf{1. Cei trei pași ai lui \texttt{counter++}.}
+(1)~\emph{load}: valoarea lui \texttt{counter} e citită din memorie într-un registru;
+(2)~\emph{add}: la registru se adună 1;
+(3)~\emph{store}: valoarea din registru e scrisă înapoi în memorie.
+
+\medskip
+\textbf{2. Cum se pierde o adunare.} Fie \texttt{counter = 5}. Thread-ul A face \emph{load} (5). Înainte ca A să scrie,
+thread-ul B face și el \emph{load} (tot 5). A face \emph{add} și \emph{store}, deci \texttt{counter = 6}. B face \emph{add}
+și \emph{store}, deci tot \texttt{counter = 6}. Au fost două incrementări, dar valoarea a crescut cu 1: scrierea lui B a
+suprascris-o pe a lui A.
+
+\medskip
+\textbf{3. De ce rezultatul diferă la fiecare rulare.} Intercalarea thread-urilor e decisă de planificatorul SO și
+depinde de nucleele libere, de întreruperi, de alte procese și de cache. Momentele în care un thread e întrerupt între
+\emph{load} și \emph{store} nu sunt deterministe, deci nici numărul de adunări pierdute nu este.
+\end{answer}
+
+%======================================================================
+\section{Partea 2 -- Reparăm: mutex, apoi semafor}
+
+\subsection{Mutex în jurul lui \texttt{counter++}}
+\begin{lstlisting}[language=C,title={\texttt{mutex.c}}]
+/* mutex.c - the same counter, now protected by a mutex.
+ * Build: gcc -Wall -pthread -o mutex mutex.c
+ */
+#include <stdio.h>
+#include <pthread.h>
+
+#define N 1000000
+
+long counter = 0;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+void *add(void *arg) {
+    for (int i = 0; i < N; i++) {
+        pthread_mutex_lock(&lock);         /* only one thread past this line */
+        counter++;                         /* the critical section */
+        pthread_mutex_unlock(&lock);       /* let the other one in */
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t a, b;
+    pthread_create(&a, NULL, add, NULL);
+    pthread_create(&b, NULL, add, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    printf("counter = %ld (expected %d)\n", counter, 2 * N);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{Același lock, construit dintr-un semafor}
+Un semafor care pornește de la 1 se comportă ca un mutex.
+\begin{lstlisting}[language=C,title={\texttt{sem.c}}]
+/* sem.c - the same counter, protected by a semaphore that starts at 1.
+ * Build: gcc -Wall -pthread -o sem sem.c
+ */
+#include <stdio.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+#define N 1000000
+
+long counter = 0;
+sem_t s;
+
+void *add(void *arg) {
+    for (int i = 0; i < N; i++) {
+        sem_wait(&s);           /* 1 -> 0: I go in; at 0: wait */
+        counter++;
+        sem_post(&s);           /* 0 -> 1: the next one may go in */
+    }
+    return NULL;
+}
+
+int main(void) {
+    sem_init(&s, 0, 1);         /* 0 = shared between threads, 1 = start value */
+    pthread_t a, b;
+    pthread_create(&a, NULL, add, NULL);
+    pthread_create(&b, NULL, add, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    printf("counter = %ld (expected %d)\n", counter, 2 * N);
+    sem_destroy(&s);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{terminal}[Rulări (câte 3)]
+\begin{verbatim}
+$ ./mutex ; ./mutex ; ./mutex
+counter = 2000000 (expected 2000000)
+counter = 2000000 (expected 2000000)
+counter = 2000000 (expected 2000000)
+$ ./sem ; ./sem ; ./sem
+counter = 2000000 (expected 2000000)
+counter = 2000000 (expected 2000000)
+counter = 2000000 (expected 2000000)
+\end{verbatim}
+\end{terminal}
+
+\subsection{Prețul lock-ului}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Program & Rezultat & Timp real \\
+\midrule
+\texttt{race}   & 1\,774\,285 (greșit) & 0.007 s \\
+\texttt{mutex}  & 2\,000\,000 & 0.156 s \\
+\texttt{sem}    & 2\,000\,000 & 0.148 s \\
+\texttt{atomic} (opțional) & 2\,000\,000 & 0.040 s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Observații}
+\begin{answer}
+\textbf{1. Răspunsul e mereu 2\,000\,000?} Da, la toate rulările. Secțiunea critică e executată de un singur thread o
+dată, deci pașii load/add/store ai celor două thread-uri nu se mai intercalează.
+
+\medskip
+\textbf{2. \texttt{sem\_init(\&s, 0, 2)}.} Rezultat obținut: \texttt{counter = 1837182}, apoi \texttt{1881306}, deci din
+nou greșit. Semaforul pornește de la 2, așa că ambele thread-uri trec de \texttt{sem\_wait} fără să aștepte
+($2\to1\to0$) și intră simultan în secțiunea critică. Excluderea mutuală se pierde și race-ul revine. Ca lock, semaforul
+trebuie să pornească de la 1.
+
+\medskip
+\textbf{3. De ce versiunea cu lock e mai lentă.} Fiecare incrementare costă în plus un lock și un unlock (operații
+atomice cu bariere de memorie), de 2 milioane de ori. Thread-urile se așteaptă reciproc, deci lucrează practic în serie.
+La conflict se ajunge în kernel (futex), adică la context switch, iar linia de cache cu lock-ul „sare” între nuclee.
+\end{answer}
+
+%======================================================================
+\section{Partea 3 -- Semaforul ca semnal}
+Aici problema e \textbf{ordinea}: B trebuie să citească mesajul abia după ce A l-a scris. Un semafor care pornește de la 0
+e o ușă închisă.
+
+\begin{lstlisting}[language=C,title={\texttt{order.c}}]
+/* order.c - thread B must wait until thread A has written the message.
+ * A semaphore that starts at 0 is a signal: sem_wait blocks until someone posts.
+ * Build: gcc -Wall -pthread -o order order.c
+ */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+char message[32];
+sem_t ready;                    /* starts at 0: nothing is ready yet */
+
+void *writer(void *arg) {
+    sleep(1);                   /* pretend the work takes a while */
+    strcpy(message, "hello");
+    printf("A: message written\n");
+    sem_post(&ready);           /* 0 -> 1: wake up B */
+    return NULL;
+}
+
+void *reader(void *arg) {
+    printf("B: waiting for the message...\n");
+    sem_wait(&ready);           /* blocks while the value is 0 */
+    printf("B: I read \"%s\"\n", message);
+    return NULL;
+}
+
+int main(void) {
+    sem_init(&ready, 0, 0);
+    pthread_t a, b;
+    pthread_create(&b, NULL, reader, NULL);   /* B starts first, on purpose */
+    pthread_create(&a, NULL, writer, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    sem_destroy(&ready);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{terminal}[Rulare (valoare inițială 0)]
+\begin{verbatim}
+$ ./order
+B: waiting for the message...
+A: message written
+B: I read "hello"
+\end{verbatim}
+\end{terminal}
+B afișează imediat prima linie, programul stă o secundă, apoi A și B termină.
+
+\begin{terminal}[Rulare cu sem\_init(\&ready, 0, 1)]
+\begin{verbatim}
+$ ./order
+B: waiting for the message...
+B: I read ""
+A: message written
+\end{verbatim}
+\end{terminal}
+
+\subsection*{Observații}
+\begin{answer}
+\textbf{1. Cu valoarea inițială 1.} B citește un \textbf{șir gol}. \texttt{sem\_wait} reușește imediat ($1\to0$), deci
+B nu așteaptă și citește \texttt{message} înainte ca A (care doarme 1~s) să-l scrie. \texttt{message} e o variabilă
+globală inițializată cu zerouri, adică șirul vid.
+
+\medskip
+\textbf{2. Semafor care pornește de la 0.} E un \emph{semnal}: oricine face \texttt{sem\_wait} se blochează până când alt
+thread anunță prin \texttt{sem\_post} că evenimentul așteptat s-a produs.
+\end{answer}
+
+%======================================================================
+\section{Partea 4 -- Semaforul ca numărător: parcarea}
+Șase mașini, trei locuri. Semaforul pornește de la 3 și numără locurile libere. Mutexul ține doar \texttt{inside} și
+\texttt{printf} împreună.
+
+\begin{lstlisting}[language=C,title={\texttt{parking.c}}]
+/* parking.c - 6 cars, 3 places. A semaphore that starts at 3 counts the free places.
+ * Build: gcc -Wall -pthread -o parking parking.c
+ */
+#include <stdio.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+#define PLACES 3
+#define CARS   6
+
+sem_t places;                                   /* free places */
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+int inside = 0;                                 /* only for printing */
+
+void *car(void *arg) {
+    long id = (long)arg;
+    sem_wait(&places);                          /* take a place, or wait */
+    pthread_mutex_lock(&lock);
+    inside++;
+    printf("car %ld enters (inside: %d)\n", id, inside);
+    pthread_mutex_unlock(&lock);
+
+    sleep(1);                                   /* parked */
+
+    pthread_mutex_lock(&lock);
+    inside--;
+    printf("car %ld leaves (inside: %d)\n", id, inside);
+    pthread_mutex_unlock(&lock);
+    sem_post(&places);                          /* give the place back */
+    return NULL;
+}
+
+int main(void) {
+    sem_init(&places, 0, PLACES);
+    pthread_t t[CARS];
+    for (long i = 0; i < CARS; i++)
+        pthread_create(&t[i], NULL, car, (void *)(i + 1));
+    for (int i = 0; i < CARS; i++)
+        pthread_join(t[i], NULL);
+    sem_destroy(&places);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{terminal}[Rulare (PLACES = 3)]
+\begin{verbatim}
+$ ./parking
+car 1 enters (inside: 1)
+car 2 enters (inside: 2)
+car 3 enters (inside: 3)
+car 2 leaves (inside: 2)
+car 1 leaves (inside: 1)
+car 3 leaves (inside: 0)
+car 4 enters (inside: 1)
+car 6 enters (inside: 2)
+car 5 enters (inside: 3)
+car 6 leaves (inside: 2)
+car 4 leaves (inside: 1)
+car 5 leaves (inside: 0)
+\end{verbatim}
+\end{terminal}
+
+\begin{terminal}[Rulare cu PLACES = 1]
+\begin{verbatim}
+$ ./parking
+car 2 enters (inside: 1)
+car 2 leaves (inside: 0)
+car 1 enters (inside: 1)
+car 1 leaves (inside: 0)
+car 3 enters (inside: 1)
+car 3 leaves (inside: 0)
+car 4 enters (inside: 1)
+car 4 leaves (inside: 0)
+car 5 enters (inside: 1)
+car 5 leaves (inside: 0)
+car 6 enters (inside: 1)
+car 6 leaves (inside: 0)
+\end{verbatim}
+\end{terminal}
+
+\subsection*{Observații}
+\begin{answer}
+\textbf{1. Valoarea maximă a lui \texttt{inside}.} Maximul e \textbf{3}. Îl garantează \texttt{sem\_wait(\&places);},
+împreună cu inițializarea \texttt{sem\_init(\&places, 0, PLACES)}. Fiecare mașină care intră ia o unitate, iar la 0 a
+patra mașină se blochează până când una care pleacă face \texttt{sem\_post(\&places)}.
+
+\medskip
+\textbf{2. Cu \texttt{PLACES = 1}.} Semaforul devine \textbf{binar}, adică un mutex: o singură mașină poate fi în
+parcare la un moment dat, iar mașinile intră strict pe rând (circa 6~s în total, față de circa 2~s).
+\end{answer}
+
+%======================================================================
+\section{Opțional -- fără lock: operație atomică}
+\begin{lstlisting}[language=C,title={\texttt{atomic.c}}]
+/* atomic.c - the counter of race.c, with no lock at all: one atomic instruction per addition.
+ * Build: gcc -Wall -pthread -o atomic atomic.c
+ */
+#include <stdio.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+#define N 1000000
+
+atomic_long counter = 0;                 /* every operation on it is indivisible */
+
+void *add(void *arg) {
+    for (int i = 0; i < N; i++)
+        atomic_fetch_add(&counter, 1);   /* load, add, store as ONE step */
+    return NULL;
+}
+
+int main(void) {
+    pthread_t a, b;
+    pthread_create(&a, NULL, add, NULL);
+    pthread_create(&b, NULL, add, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    printf("counter = %ld (expected %d)\n", (long)counter, 2 * N);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{terminal}[Rulare]
+\begin{verbatim}
+$ time ./atomic
+counter = 2000000 (expected 2000000)
+real    0m0.040s
+\end{verbatim}
+\end{terminal}
+\texttt{atomic\_fetch\_add} face load, add și store ca o singură instrucțiune indivizibilă (pe x86, \texttt{lock xadd}).
+Rezultatul e corect, iar programul e de circa 4 ori mai rapid decât varianta cu mutex, pentru că nu există blocare și nici
+intrare în kernel. Metoda funcționează însă doar pentru operații simple pe o singură variabilă.
+
+%======================================================================
+\section*{Concluzii}
+Am observat direct un race condition: fără protecție, două thread-uri care incrementează același contor pierd o parte
+din adunări, pentru că \texttt{counter++} înseamnă trei pași (load, add, store) care se pot intercala. Mutexul și
+semaforul inițializat cu 1 rezolvă problema prin excludere mutuală, cu un cost de performanță de circa 20 de ori pe
+acest exemplu. Am văzut că semaforul e un instrument general, al cărui rol îl dă valoarea inițială: cu 1 e un
+\emph{lock}, cu 0 e un \emph{semnal} care impune ordinea între thread-uri, iar cu $N$ e un \emph{numărător} care
+limitează accesul la $N$ resurse (parcarea). Pentru un singur contor, operațiile atomice sunt alternativa cea mai
+rapidă.
+
+\end{document}
